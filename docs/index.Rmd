@@ -1,0 +1,1656 @@
+---
+title: 'R : Implementing Gradient Descent Algorithm in Estimating Regression Coefficients'
+author: "John Pauline Pineda"
+date: '2023-01-13'
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: readable
+    highlight: tango
+    css: doc.css
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width=15, fig.height=10)
+```
+# **1. Table of Contents**
+|
+| This document implements the gradient descent algorithm to estimate regression coefficients using various helpful packages in <mark style="background-color: #CCECFF">**R**</mark>.    
+|
+##  1.1 Sample Data
+|
+| The <mark style="background-color: #EEEEEE;color: #FF0000">**Solubility**</mark>  dataset from the  <mark style="background-color: #CCECFF">**AppliedPredictiveModeling**</mark> package was used for this illustrated example. Other original predictors were removed from the dataset leaving only a subset of numeric predictors used during the analysis.
+|
+| Preliminary dataset assessment:
+|
+| **[A]** 951 rows (observations)
+|      **[A.1]** Train Set = 951 observations
+| 
+| **[B]** 6 columns (variables)
+|      **[B.1]** 1/6 response = <span style="color: #FF0000">Log_Solubility</span> variable (numeric)
+|      **[B.2]** 5/6 predictors = All remaining variables (0/5 factor + 5/5 numeric)
+|     
+| 
+```{r section_1.1, warning=FALSE, message=FALSE}
+##################################
+# Loading R libraries
+##################################
+library(AppliedPredictiveModeling)
+library(caret)
+library(rpart)
+library(lattice)
+library(dplyr)
+library(tidyr)
+library(moments)
+library(skimr)
+library(RANN)
+library(pls)
+library(corrplot)
+library(tidyverse)
+library(lares)
+library(DMwR)
+library(gridExtra)
+library(rattle)
+library(rpart.plot)
+library(RColorBrewer)
+library(stats)
+
+##################################
+# Loading source and
+# formulating the train set
+##################################
+data(solubility)
+Solubility_Train <- as.data.frame(cbind(solTrainY,solTrainX))
+
+##################################
+# Selecting only a subset of 
+# numeric predictors for the train set
+##################################
+Solubility_Train <- Solubility_Train[,c("solTrainY",
+                                        "MolWeight",
+                                        "NumCarbon",
+                                        "NumChlorine",
+                                        "NumHalogen",
+                                        "NumMultBonds")]
+
+##################################
+# Performing a general exploration of the train set
+##################################
+dim(Solubility_Train)
+str(Solubility_Train)
+summary(Solubility_Train)
+
+##################################
+# Formulating a data type assessment summary
+##################################
+PDA <- Solubility_Train
+(PDA.Summary <- data.frame(
+  Column.Index=c(1:length(names(PDA))),
+  Column.Name= names(PDA), 
+  Column.Type=sapply(PDA, function(x) class(x)), 
+  row.names=NULL)
+)
+```
+
+##  1.2 Data Quality Assessment
+|
+| Data quality assessment:
+|
+| **[A]** No missing observations noted for any variable.
+|
+| **[B]** Low variance observed for 2 variables with First.Second.Mode.Ratio>5.
+|      **[B.1]** <span style="color: #FF0000">NumChlorine</span> variable (numeric)
+|      **[B.2]** <span style="color: #FF0000">NumHalogen</span> variable (numeric)
+|
+| **[C]** No low variance observed for any variable with Unique.Count.Ratio<0.01.
+|
+| **[D]** High skewness observed for 1 variable with Skewness>3 or Skewness<(-3).
+|      **[D.1]** <span style="color: #FF0000">NumChlorine</span> variable (numeric)
+|
+```{r section_1.2, warning=FALSE, message=FALSE}
+##################################
+# Loading dataset
+##################################
+DQA <- Solubility_Train
+
+##################################
+# Formulating an overall data quality assessment summary
+##################################
+(DQA.Summary <- data.frame(
+  Column.Index=c(1:length(names(DQA))),
+  Column.Name= names(DQA), 
+  Column.Type=sapply(DQA, function(x) class(x)), 
+  Row.Count=sapply(DQA, function(x) nrow(DQA)),
+  NA.Count=sapply(DQA,function(x)sum(is.na(x))),
+  Fill.Rate=sapply(DQA,function(x)format(round((sum(!is.na(x))/nrow(DQA)),3),nsmall=3)),
+  row.names=NULL)
+)
+
+##################################
+# Listing all predictors
+##################################
+DQA.Predictors <- DQA[,!names(DQA) %in% c("solTrainY")]
+
+##################################
+# Listing all numeric predictors
+##################################
+DQA.Predictors.Numeric <- DQA.Predictors[,sapply(DQA.Predictors, is.numeric)]
+
+if (length(names(DQA.Predictors.Numeric))>0) {
+    print(paste0("There are ",
+               (length(names(DQA.Predictors.Numeric))),
+               " numeric predictor variable(s)."))
+} else {
+  print("There are no numeric predictor variables.")
+}
+
+##################################
+# Listing all factor predictors
+##################################
+DQA.Predictors.Factor <- DQA.Predictors[,sapply(DQA.Predictors, is.factor)]
+
+if (length(names(DQA.Predictors.Factor))>0) {
+    print(paste0("There are ",
+               (length(names(DQA.Predictors.Factor))),
+               " factor predictor variable(s)."))
+} else {
+  print("There are no factor predictor variables.")
+}
+
+##################################
+# Formulating a data quality assessment summary for factor predictors
+##################################
+if (length(names(DQA.Predictors.Factor))>0) {
+  
+  ##################################
+  # Formulating a function to determine the first mode
+  ##################################
+  FirstModes <- function(x) {
+    ux <- unique(na.omit(x))
+    tab <- tabulate(match(x, ux))
+    ux[tab == max(tab)]
+  }
+
+  ##################################
+  # Formulating a function to determine the second mode
+  ##################################
+  SecondModes <- function(x) {
+    ux <- unique(na.omit(x))
+    tab <- tabulate(match(x, ux))
+    fm = ux[tab == max(tab)]
+    sm = x[!(x %in% fm)]
+    usm <- unique(sm)
+    tabsm <- tabulate(match(sm, usm))
+    ifelse(is.na(usm[tabsm == max(tabsm)])==TRUE,
+           return("x"),
+           return(usm[tabsm == max(tabsm)]))
+  }
+  
+  (DQA.Predictors.Factor.Summary <- data.frame(
+  Column.Name= names(DQA.Predictors.Factor), 
+  Column.Type=sapply(DQA.Predictors.Factor, function(x) class(x)), 
+  Unique.Count=sapply(DQA.Predictors.Factor, function(x) length(unique(x))),
+  First.Mode.Value=sapply(DQA.Predictors.Factor, function(x) as.character(FirstModes(x)[1])),
+  Second.Mode.Value=sapply(DQA.Predictors.Factor, function(x) as.character(SecondModes(x)[1])),
+  First.Mode.Count=sapply(DQA.Predictors.Factor, function(x) sum(na.omit(x) == FirstModes(x)[1])),
+  Second.Mode.Count=sapply(DQA.Predictors.Factor, function(x) sum(na.omit(x) == SecondModes(x)[1])),
+  Unique.Count.Ratio=sapply(DQA.Predictors.Factor, function(x) format(round((length(unique(x))/nrow(DQA.Predictors.Factor)),3), nsmall=3)),
+  First.Second.Mode.Ratio=sapply(DQA.Predictors.Factor, function(x) format(round((sum(na.omit(x) == FirstModes(x)[1])/sum(na.omit(x) == SecondModes(x)[1])),3), nsmall=3)),
+  row.names=NULL)
+  )
+  
+} 
+
+##################################
+# Formulating a data quality assessment summary for numeric predictors
+##################################
+if (length(names(DQA.Predictors.Numeric))>0) {
+  
+  ##################################
+  # Formulating a function to determine the first mode
+  ##################################
+  FirstModes <- function(x) {
+    ux <- unique(na.omit(x))
+    tab <- tabulate(match(x, ux))
+    ux[tab == max(tab)]
+  }
+
+  ##################################
+  # Formulating a function to determine the second mode
+  ##################################
+  SecondModes <- function(x) {
+    ux <- unique(na.omit(x))
+    tab <- tabulate(match(x, ux))
+    fm = ux[tab == max(tab)]
+    sm = na.omit(x)[!(na.omit(x) %in% fm)]
+    usm <- unique(sm)
+    tabsm <- tabulate(match(sm, usm))
+    ifelse(is.na(usm[tabsm == max(tabsm)])==TRUE,
+           return(0.00001),
+           return(usm[tabsm == max(tabsm)]))
+  }
+  
+  (DQA.Predictors.Numeric.Summary <- data.frame(
+  Column.Name= names(DQA.Predictors.Numeric), 
+  Column.Type=sapply(DQA.Predictors.Numeric, function(x) class(x)), 
+  Unique.Count=sapply(DQA.Predictors.Numeric, function(x) length(unique(x))),
+  Unique.Count.Ratio=sapply(DQA.Predictors.Numeric, function(x) format(round((length(unique(x))/nrow(DQA.Predictors.Numeric)),3), nsmall=3)),
+  First.Mode.Value=sapply(DQA.Predictors.Numeric, function(x) format(round((FirstModes(x)[1]),3),nsmall=3)),
+  Second.Mode.Value=sapply(DQA.Predictors.Numeric, function(x) format(round((SecondModes(x)[1]),3),nsmall=3)),
+  First.Mode.Count=sapply(DQA.Predictors.Numeric, function(x) sum(na.omit(x) == FirstModes(x)[1])),
+  Second.Mode.Count=sapply(DQA.Predictors.Numeric, function(x) sum(na.omit(x) == SecondModes(x)[1])),
+  First.Second.Mode.Ratio=sapply(DQA.Predictors.Numeric, function(x) format(round((sum(na.omit(x) == FirstModes(x)[1])/sum(na.omit(x) == SecondModes(x)[1])),3), nsmall=3)),
+  Minimum=sapply(DQA.Predictors.Numeric, function(x) format(round(min(x,na.rm = TRUE),3), nsmall=3)),
+  Mean=sapply(DQA.Predictors.Numeric, function(x) format(round(mean(x,na.rm = TRUE),3), nsmall=3)),
+  Median=sapply(DQA.Predictors.Numeric, function(x) format(round(median(x,na.rm = TRUE),3), nsmall=3)),
+  Maximum=sapply(DQA.Predictors.Numeric, function(x) format(round(max(x,na.rm = TRUE),3), nsmall=3)),
+  Skewness=sapply(DQA.Predictors.Numeric, function(x) format(round(skewness(x,na.rm = TRUE),3), nsmall=3)),
+  Kurtosis=sapply(DQA.Predictors.Numeric, function(x) format(round(kurtosis(x,na.rm = TRUE),3), nsmall=3)),
+  Percentile25th=sapply(DQA.Predictors.Numeric, function(x) format(round(quantile(x,probs=0.25,na.rm = TRUE),3), nsmall=3)),
+  Percentile75th=sapply(DQA.Predictors.Numeric, function(x) format(round(quantile(x,probs=0.75,na.rm = TRUE),3), nsmall=3)),
+  row.names=NULL)
+  )  
+  
+}
+
+##################################
+# Identifying potential data quality issues
+##################################
+
+##################################
+# Checking for missing observations
+##################################
+if ((nrow(DQA.Summary[DQA.Summary$NA.Count>0,]))>0){
+  print(paste0("Missing observations noted for ",
+               (nrow(DQA.Summary[DQA.Summary$NA.Count>0,])),
+               " variable(s) with NA.Count>0 and Fill.Rate<1.0."))
+  DQA.Summary[DQA.Summary$NA.Count>0,]
+} else {
+  print("No missing observations noted.")
+}
+
+##################################
+# Checking for zero or near-zero variance predictors
+##################################
+if (length(names(DQA.Predictors.Factor))==0) {
+  print("No factor predictors noted.")
+} else if (nrow(DQA.Predictors.Factor.Summary[as.numeric(as.character(DQA.Predictors.Factor.Summary$First.Second.Mode.Ratio))>5,])>0){
+  print(paste0("Low variance observed for ",
+               (nrow(DQA.Predictors.Factor.Summary[as.numeric(as.character(DQA.Predictors.Factor.Summary$First.Second.Mode.Ratio))>5,])),
+               " factor variable(s) with First.Second.Mode.Ratio>5."))
+  DQA.Predictors.Factor.Summary[as.numeric(as.character(DQA.Predictors.Factor.Summary$First.Second.Mode.Ratio))>5,]
+} else {
+  print("No low variance factor predictors due to high first-second mode ratio noted.")
+}
+
+if (length(names(DQA.Predictors.Numeric))==0) {
+  print("No numeric predictors noted.")
+} else if (nrow(DQA.Predictors.Numeric.Summary[as.numeric(as.character(DQA.Predictors.Numeric.Summary$First.Second.Mode.Ratio))>5,])>0){
+  print(paste0("Low variance observed for ",
+               (nrow(DQA.Predictors.Numeric.Summary[as.numeric(as.character(DQA.Predictors.Numeric.Summary$First.Second.Mode.Ratio))>5,])),
+               " numeric variable(s) with First.Second.Mode.Ratio>5."))
+  DQA.Predictors.Numeric.Summary[as.numeric(as.character(DQA.Predictors.Numeric.Summary$First.Second.Mode.Ratio))>5,]
+} else {
+  print("No low variance numeric predictors due to high first-second mode ratio noted.")
+}
+
+if (length(names(DQA.Predictors.Numeric))==0) {
+  print("No numeric predictors noted.")
+} else if (nrow(DQA.Predictors.Numeric.Summary[as.numeric(as.character(DQA.Predictors.Numeric.Summary$Unique.Count.Ratio))<0.01,])>0){
+  print(paste0("Low variance observed for ",
+               (nrow(DQA.Predictors.Numeric.Summary[as.numeric(as.character(DQA.Predictors.Numeric.Summary$Unique.Count.Ratio))<0.01,])),
+               " numeric variable(s) with Unique.Count.Ratio<0.01."))
+  DQA.Predictors.Numeric.Summary[as.numeric(as.character(DQA.Predictors.Numeric.Summary$Unique.Count.Ratio))<0.01,]
+} else {
+  print("No low variance numeric predictors due to low unique count ratio noted.")
+}
+
+##################################
+# Checking for skewed predictors
+##################################
+if (length(names(DQA.Predictors.Numeric))==0) {
+  print("No numeric predictors noted.")
+} else if (nrow(DQA.Predictors.Numeric.Summary[as.numeric(as.character(DQA.Predictors.Numeric.Summary$Skewness))>3 |
+                                               as.numeric(as.character(DQA.Predictors.Numeric.Summary$Skewness))<(-3),])>0){
+  print(paste0("High skewness observed for ",
+  (nrow(DQA.Predictors.Numeric.Summary[as.numeric(as.character(DQA.Predictors.Numeric.Summary$Skewness))>3 |
+                                               as.numeric(as.character(DQA.Predictors.Numeric.Summary$Skewness))<(-3),])),
+  " numeric variable(s) with Skewness>3 or Skewness<(-3)."))
+  DQA.Predictors.Numeric.Summary[as.numeric(as.character(DQA.Predictors.Numeric.Summary$Skewness))>3 |
+                                 as.numeric(as.character(DQA.Predictors.Numeric.Summary$Skewness))<(-3),]
+} else {
+  print("No skewed numeric predictors noted.")
+}
+
+```
+
+##  1.3 Data Preprocessing
+
+###  1.3.1 Outlier
+|
+| Outlier data assessment:
+|
+| **[A]** Outliers noted for 5 variables  with the numeric data visualized through a boxplot including observations classified as suspected outliers using the IQR criterion. The IQR criterion means that all observations above the (75th percentile + 1.5 x IQR) or below the (25th percentile - 1.5 x IQR) are suspected outliers, where IQR is the difference between the third quartile (75th percentile) and first quartile (25th percentile). Outlier treatment for numerical stability remains optional depending on potential model requirements for the subsequent steps.
+|      **[A.1]** <span style="color: #FF0000">MolWeight	</span> variable (8 outliers detected)
+|      **[A.2]** <span style="color: #FF0000">NumMultBonds</span> variable (6 outliers detected)
+|      **[A.3]** <span style="color: #FF0000">NumCarbon</span> variable (35 outliers detected)
+|      **[A.4]** <span style="color: #FF0000">NumChlorine</span> variable (201 outliers detected)
+|      **[A.5]** <span style="color: #FF0000">NumHalogen</span> variable (99 outliers detected)
+|
+```{r section_1.3.1, warning=FALSE, message=FALSE, fig.width=15, fig.height=3}
+##################################
+# Loading dataset
+##################################
+DPA <- Solubility_Train
+
+##################################
+# Listing all predictors
+##################################
+DPA.Predictors <- DPA[,!names(DPA) %in% c("solTrainY")]
+
+##################################
+# Listing all numeric predictors
+##################################
+DPA.Predictors.Numeric <- DPA.Predictors[,sapply(DPA.Predictors, is.numeric)]
+
+##################################
+# Identifying outliers for the numeric predictors
+##################################
+OutlierCountList <- c()
+
+for (i in 1:ncol(DPA.Predictors.Numeric)) {
+  Outliers <- boxplot.stats(DPA.Predictors.Numeric[,i])$out
+  OutlierCount <- length(Outliers)
+  OutlierCountList <- append(OutlierCountList,OutlierCount)
+  OutlierIndices <- which(DPA.Predictors.Numeric[,i] %in% c(Outliers))
+  boxplot(DPA.Predictors.Numeric[,i], 
+          ylab = names(DPA.Predictors.Numeric)[i], 
+          main = names(DPA.Predictors.Numeric)[i],
+          horizontal=TRUE)
+  mtext(paste0(OutlierCount, " Outlier(s) Detected"))
+}
+
+OutlierCountSummary <- as.data.frame(cbind(names(DPA.Predictors.Numeric),(OutlierCountList)))
+names(OutlierCountSummary) <- c("NumericPredictors","OutlierCount")
+OutlierCountSummary$OutlierCount <- as.numeric(as.character(OutlierCountSummary$OutlierCount))
+NumericPredictorWithOutlierCount <- nrow(OutlierCountSummary[OutlierCountSummary$OutlierCount>0,])
+print(paste0(NumericPredictorWithOutlierCount, " numeric variable(s) were noted with outlier(s)." ))
+
+##################################
+# Gathering descriptive statistics
+##################################
+(DPA_Skimmed <- skim(DPA.Predictors.Numeric))
+
+###################################
+# Verifying the data dimensions
+###################################
+dim(DPA.Predictors.Numeric)
+
+```
+
+###  1.3.2 Zero and Near-Zero Variance
+|
+| Zero and near-zero variance data assessment:
+|
+| **[A]** Low variance noted for 1 variable from the previous data quality assessment using a lower threshold.
+|
+| **[B]** No low variance noted for any variable using a preprocessing summary from the <mark style="background-color: #CCECFF">**caret**</mark> package. The <span style="color: #0000FF">nearZeroVar</span> method using both the <span style="color: #0000FF">freqCut</span> and <span style="color: #0000FF">uniqueCut</span> criteria set at 95/5 and 10, respectively, were applied on the dataset.
+|
+```{r section_1.3.2, warning=FALSE, message=FALSE}
+##################################
+# Loading dataset
+##################################
+DPA <- Solubility_Train
+
+##################################
+# Gathering descriptive statistics
+##################################
+(DPA_Skimmed <- skim(DPA))
+
+##################################
+# Identifying columns with low variance
+###################################
+DPA_LowVariance <- nearZeroVar(DPA,
+                               freqCut = 95/5,
+                               uniqueCut = 10,
+                               saveMetrics= TRUE)
+(DPA_LowVariance[DPA_LowVariance$nzv,])
+
+if ((nrow(DPA_LowVariance[DPA_LowVariance$nzv,]))==0){
+  
+  print("No low variance predictors noted.")
+  
+} else {
+
+  print(paste0("Low variance observed for ",
+               (nrow(DPA_LowVariance[DPA_LowVariance$nzv,])),
+               " numeric variable(s) with First.Second.Mode.Ratio>4 and Unique.Count.Ratio<0.10."))
+  
+  DPA_LowVarianceForRemoval <- (nrow(DPA_LowVariance[DPA_LowVariance$nzv,]))
+  
+  print(paste0("Low variance can be resolved by removing ",
+               (nrow(DPA_LowVariance[DPA_LowVariance$nzv,])),
+               " numeric variable(s)."))
+  
+  for (j in 1:DPA_LowVarianceForRemoval) {
+  DPA_LowVarianceRemovedVariable <- rownames(DPA_LowVariance[DPA_LowVariance$nzv,])[j]
+  print(paste0("Variable ",
+               j,
+               " for removal: ",
+               DPA_LowVarianceRemovedVariable))
+  }
+  
+  DPA %>%
+  skim() %>%
+  dplyr::filter(skim_variable %in% rownames(DPA_LowVariance[DPA_LowVariance$nzv,]))
+
+  ##################################
+  # Filtering out columns with low variance
+  #################################
+  DPA_ExcludedLowVariance <- DPA[,!names(DPA) %in% rownames(DPA_LowVariance[DPA_LowVariance$nzv,])]
+  
+  ##################################
+  # Gathering descriptive statistics
+  ##################################
+  (DPA_ExcludedLowVariance_Skimmed <- skim(DPA_ExcludedLowVariance))
+}
+
+```
+
+###  1.3.3 Collinearity
+|
+| High collinearity data assessment:
+|
+| **[A]** No high correlation > 95% were noted for any variable pair as confirmed using the preprocessing summaries from the <mark style="background-color: #CCECFF">**caret**</mark> and <mark style="background-color: #CCECFF">**lares**</mark> packages.
+|
+```{r section_1.3.3, warning=FALSE, message=FALSE}
+##################################
+# Loading dataset
+##################################
+DPA <- Solubility_Train
+
+##################################
+# Listing all predictors
+##################################
+DPA.Predictors <- DPA[,!names(DPA) %in% c("solTrainY")]
+
+##################################
+# Listing all numeric predictors
+##################################
+DPA.Predictors.Numeric <- DPA.Predictors[,sapply(DPA.Predictors, is.numeric)]
+
+##################################
+# Visualizing pairwise correlation between predictors
+##################################
+DPA_CorrelationTest <- cor.mtest(DPA.Predictors.Numeric,
+                       method = "pearson",
+                       conf.level = .95)
+
+corrplot(cor(DPA.Predictors.Numeric,
+             method = "pearson",
+             use="pairwise.complete.obs"), 
+         method = "circle",
+         type = "upper", 
+         order = "original", 
+         tl.col = "black", 
+         tl.cex = 0.75,
+         tl.srt = 90, 
+         sig.level = 0.05, 
+         p.mat = DPA_CorrelationTest$p,
+         insig = "blank")
+
+
+
+##################################
+# Identifying the highly correlated variables
+##################################
+DPA_Correlation <-  cor(DPA.Predictors.Numeric, 
+                        method = "pearson",
+                        use="pairwise.complete.obs")
+(DPA_HighlyCorrelatedCount <- sum(abs(DPA_Correlation[upper.tri(DPA_Correlation)]) > 0.95))
+
+if (DPA_HighlyCorrelatedCount == 0) {
+  print("No highly correlated predictors noted.")
+} else {
+  print(paste0("High correlation observed for ",
+               (DPA_HighlyCorrelatedCount),
+               " pairs of numeric variable(s) with Correlation.Coefficient>0.95."))
+  
+  (DPA_HighlyCorrelatedPairs <- corr_cross(DPA.Predictors.Numeric,
+  max_pvalue = 0.05, 
+  top = DPA_HighlyCorrelatedCount,
+  rm.na = TRUE,
+  grid = FALSE
+))
+  
+}
+
+
+if (DPA_HighlyCorrelatedCount > 0) {
+  DPA_HighlyCorrelated <- findCorrelation(DPA_Correlation, cutoff = 0.95)
+  
+  (DPA_HighlyCorrelatedForRemoval <- length(DPA_HighlyCorrelated))
+  
+  print(paste0("High correlation can be resolved by removing ",
+               (DPA_HighlyCorrelatedForRemoval),
+               " numeric variable(s)."))
+  
+  for (j in 1:DPA_HighlyCorrelatedForRemoval) {
+  DPA_HighlyCorrelatedRemovedVariable <- colnames(DPA.Predictors.Numeric)[DPA_HighlyCorrelated[j]]
+  print(paste0("Variable ",
+               j,
+               " for removal: ",
+               DPA_HighlyCorrelatedRemovedVariable))
+  }
+  
+  ##################################
+  # Filtering out columns with high correlation
+  #################################
+  DPA_ExcludedHighCorrelation <- DPA[,-DPA_HighlyCorrelated]
+  
+  ##################################
+  # Gathering descriptive statistics
+  ##################################
+  (DPA_ExcludedHighCorrelation_Skimmed <- skim(DPA_ExcludedHighCorrelation))
+
+}
+
+```
+
+###  1.3.4 Linear Dependencies
+|
+| Linear dependency data assessment:
+|
+| **[A]** No linear dependencies noted for any subset of variables using the preprocessing summary from the <mark style="background-color: #CCECFF">**caret**</mark> package applying the <span style="color: #0000FF">findLinearCombos</span> method which utilizes the QR decomposition of a matrix to enumerate sets of linear combinations (if they exist). 
+|
+```{r section_1.3.4, warning=FALSE, message=FALSE}
+##################################
+# Loading dataset
+##################################
+DPA <- Solubility_Train
+
+##################################
+# Listing all predictors
+##################################
+DPA.Predictors <- DPA[,!names(DPA) %in% c("solTrainY")]
+
+##################################
+# Listing all numeric predictors
+##################################
+DPA.Predictors.Numeric <- DPA.Predictors[,sapply(DPA.Predictors, is.numeric)]
+
+##################################
+# Identifying the linearly dependent variables
+##################################
+DPA_LinearlyDependent <- findLinearCombos(DPA.Predictors.Numeric)
+
+(DPA_LinearlyDependentCount <- length(DPA_LinearlyDependent$linearCombos))
+
+if (DPA_LinearlyDependentCount == 0) {
+  print("No linearly dependent predictors noted.")
+} else {
+  print(paste0("Linear dependency observed for ",
+               (DPA_LinearlyDependentCount),
+               " subset(s) of numeric variable(s)."))
+  
+  for (i in 1:DPA_LinearlyDependentCount) {
+    DPA_LinearlyDependentSubset <- colnames(DPA.Predictors.Numeric)[DPA_LinearlyDependent$linearCombos[[i]]]
+    print(paste0("Linear dependent variable(s) for subset ",
+                 i,
+                 " include: ",
+                 DPA_LinearlyDependentSubset))
+  }
+  
+}
+
+##################################
+# Identifying the linearly dependent variables for removal
+##################################
+
+if (DPA_LinearlyDependentCount > 0) {
+  DPA_LinearlyDependent <- findLinearCombos(DPA.Predictors.Numeric)
+  
+  DPA_LinearlyDependentForRemoval <- length(DPA_LinearlyDependent$remove)
+  
+  print(paste0("Linear dependency can be resolved by removing ",
+               (DPA_LinearlyDependentForRemoval),
+               " numeric variable(s)."))
+  
+  for (j in 1:DPA_LinearlyDependentForRemoval) {
+  DPA_LinearlyDependentRemovedVariable <- colnames(DPA.Predictors.Numeric)[DPA_LinearlyDependent$remove[j]]
+  print(paste0("Variable ",
+               j,
+               " for removal: ",
+               DPA_LinearlyDependentRemovedVariable))
+  }
+  
+  ##################################
+  # Filtering out columns with linear dependency
+  #################################
+  DPA_ExcludedLinearlyDependent <- DPA[,-DPA_LinearlyDependent$remove]
+  
+  ##################################
+  # Gathering descriptive statistics
+  ##################################
+  (DPA_ExcludedLinearlyDependent_Skimmed <- skim(DPA_ExcludedLinearlyDependent))
+
+}
+
+```
+
+###  1.3.5 Shape Transformation
+|
+| Data transformation assessment:
+|
+| **[A]** A number of numeric variables in the dataset were observed to be right-skewed which required shape transformation for data distribution stability. Considering that all numeric variables were strictly positive values, the <span style="color: #0000FF">BoxCox</span> method from the <mark style="background-color: #CCECFF">**caret**</mark> package was used to transform their distributional shapes.
+|
+```{r section_1.3.5, warning=FALSE, message=FALSE}
+##################################
+# Loading dataset
+##################################
+DPA <- Solubility_Train
+
+##################################
+# Listing all predictors
+##################################
+DPA.Predictors <- DPA[,!names(DPA) %in% c("solTrainY")]
+
+##################################
+# Listing all numeric predictors
+##################################
+DPA.Predictors.Numeric <- DPA.Predictors[,sapply(DPA.Predictors, is.numeric)]
+
+##################################
+# Applying a Box-Cox transformation
+##################################
+DPA_BoxCox <- preProcess(DPA.Predictors.Numeric, method = c("BoxCox"))
+DPA_BoxCoxTransformed <- predict(DPA_BoxCox, DPA.Predictors.Numeric)
+
+##################################
+# Gathering descriptive statistics
+##################################
+(DPA_BoxCoxTransformedSkimmed <- skim(DPA_BoxCoxTransformed))
+
+###################################
+# Verifying the data dimensions
+###################################
+dim(DPA_BoxCoxTransformed)
+
+```
+
+###  1.3.6 Centering and Scaling
+|
+| Centering and scaling data assessment:
+|
+| **[A]** To maintain numerical stability during modelling, centering and scaling transformations were applied on the transformed numeric variables. The <span style="color: #0000FF">center</span> method from the <mark style="background-color: #CCECFF">**caret**</mark> package was implemented which subtracts the average value of a numeric variable to all the values. As a result of centering, the variables had zero mean values. In addition, the <span style="color: #0000FF">scale</span> method, also from the <mark style="background-color: #CCECFF">**caret**</mark> package, was applied which performs a center transformation with each value of the variable divided by its standard deviation. Scaling the data coerced the values to have a common standard deviation of one.
+|
+```{r section_1.3.6, warning=FALSE, message=FALSE}
+##################################
+# Loading dataset
+##################################
+DPA <- Solubility_Train
+
+##################################
+# Listing all predictors
+##################################
+DPA.Predictors <- DPA[,!names(DPA) %in% c("solTrainY")]
+
+##################################
+# Listing all numeric predictors
+##################################
+DPA.Predictors.Numeric <- DPA.Predictors[,sapply(DPA.Predictors, is.numeric)]
+
+##################################
+# Applying a Box-Cox transformation
+##################################
+DPA_BoxCox <- preProcess(DPA.Predictors.Numeric, method = c("BoxCox"))
+DPA_BoxCoxTransformed <- predict(DPA_BoxCox, DPA.Predictors.Numeric)
+
+##################################
+# Applying a center and scale data transformation
+##################################
+DPA.Predictors.Numeric_BoxCoxTransformed_CenteredScaled <- preProcess(DPA_BoxCoxTransformed, method = c("center","scale"))
+DPA.Predictors.Numeric_BoxCoxTransformed_CenteredScaledTransformed <- predict(DPA.Predictors.Numeric_BoxCoxTransformed_CenteredScaled, DPA_BoxCoxTransformed)
+
+##################################
+# Gathering descriptive statistics
+##################################
+(DPA.Predictors.Numeric_BoxCoxTransformed_CenteredScaledTransformedSkimmed <- skim(DPA.Predictors.Numeric_BoxCoxTransformed_CenteredScaledTransformed))
+
+###################################
+# Verifying the data dimensions
+###################################
+dim(DPA.Predictors.Numeric_BoxCoxTransformed_CenteredScaledTransformed)
+
+```
+
+###  1.3.7 Pre-Processed Dataset
+|
+| Preliminary dataset assessment:
+|
+| **[A]** 951 rows (observations)
+|      **[A.1]** Train Set = 951 observations
+| 
+| **[B]** 6 columns (variables)
+|      **[B.1]** 1/6 response = <span style="color: #FF0000">Log_Solubility</span> variable (numeric)
+|      **[B.2]** 5/6 predictors = All remaining variables (0/5 factor + 5/5 numeric)
+| 
+| **[C]** Pre-processing actions applied:
+|      **[C.1]** Centering, scaling and shape transformation applied to improve data quality
+|      **[C.2]** No outlier treatment applied since the high values noted were contextually valid and sensible 
+|      **[C.3]** No predictors removed due to zero or near-zero variance 
+|      **[C.4]** No predictors removed due to high correlation
+|      **[C.5]** No predictors removed due to linear dependencies
+| 
+```{r section_1.3.7, warning=FALSE, message=FALSE}
+##################################
+# Creating the pre-modelling
+# train set
+##################################
+Log_Solubility <- DPA$solTrainY 
+PMA.Predictors.Numeric  <- DPA.Predictors.Numeric_BoxCoxTransformed_CenteredScaledTransformed
+PMA_BoxCoxTransformed_CenteredScaledTransformed <- cbind(Log_Solubility,PMA.Predictors.Numeric)
+PMA_PreModelling_Train <- PMA_BoxCoxTransformed_CenteredScaledTransformed
+
+##################################
+# Gathering descriptive statistics
+##################################
+(PMA_PreModelling_Train_Skimmed <- skim(PMA_PreModelling_Train))
+
+###################################
+# Verifying the data dimensions
+# for the train set
+###################################
+dim(PMA_PreModelling_Train)
+
+```
+
+## 1.4 Data Exploration
+|
+| Exploratory data analysis:
+|
+| **[A]** The numeric variables demonstrated linear or non-linear relationships with the <span style="color: #FF0000">Log_Solubility</span> response variable:
+|      **[A.1]** <span style="color: #FF0000">MolWeight</span> variable (numeric)
+|      **[A.2]** <span style="color: #FF0000">NumCarbon</span> variable (numeric)
+|      **[A.3]** <span style="color: #FF0000">NumChlorine</span> variable (numeric)
+|      **[A.4]** <span style="color: #FF0000">NumHalogen</span> variable (numeric)
+|      **[A.5]** <span style="color: #FF0000">NumMultBonds</span> variable (numeric)
+|
+```{r section_1.4, warning=FALSE, message=FALSE}
+##################################
+# Loading dataset
+##################################
+EDA <- PMA_PreModelling_Train
+
+##################################
+# Listing all predictors
+##################################
+EDA.Predictors <- EDA[,!names(EDA) %in% c("Log_Solubility")]
+
+##################################
+# Listing all numeric predictors
+##################################
+EDA.Predictors.Numeric <- EDA.Predictors[,sapply(EDA.Predictors, is.numeric)]
+ncol(EDA.Predictors.Numeric)
+names(EDA.Predictors.Numeric)
+
+##################################
+# Formulating the scatter plots
+##################################
+featurePlot(x = EDA.Predictors.Numeric, 
+            y = EDA$Log_Solubility,
+            between = list(x = 1, y = 1),
+            type = c("g", "p", "smooth"),
+            labels = rep("", 2))
+
+```
+
+## 1.5 Linear Regression Model Coefficient Estimation
+
+###  1.5.1 Linear Regression - Normal Equations (LR_NE)
+|
+| **[A]** Applying normal equations, the estimated linear regression coefficients for the given data are as follows:
+|      **[A.1]** <span style="color: #FF0000">Intercept</span> = -2.71856
+|      **[A.2]** <span style="color: #FF0000">MolWeight</span> = +0.20493
+|      **[A.3]** <span style="color: #FF0000">NumCarbon</span> = -1.25425
+|      **[A.4]** <span style="color: #FF0000">NumChlorine</span> = -0.14419
+|      **[A.5]** <span style="color: #FF0000">NumHalogen</span> = -1.01350
+|      **[A.6]** <span style="color: #FF0000">NumMultBonds</span> = -0.33048
+|
+| **[B]** These estimated coefficients will be the baseline values from which all gradient descent algorithm-derived coefficients will be compared with.
+|
+```{r section_1.5.1, warning=FALSE, message=FALSE}
+##################################
+# Defining a function to implement
+# normal equations for estimating
+# linear regression coefficients
+##################################
+NormalEquations_LREstimation <- function(y, X){
+  X = data.frame(rep(1,length(y)),X)
+  X = as.matrix(X)
+  LRcoefficients = solve(t(X)%*%X)%*%t(X)%*%y
+  return(LRcoefficients)
+}
+
+##################################
+# Loading dataset
+# and restructuring to the 
+# y and X components
+##################################
+y               <- PMA_PreModelling_Train$Log_Solubility
+x1_MolWeight    <- PMA_PreModelling_Train$MolWeight
+x2_NumCarbon    <- PMA_PreModelling_Train$NumCarbon
+x3_NumChlorine  <- PMA_PreModelling_Train$NumChlorine
+x4_NumHalogen   <- PMA_PreModelling_Train$NumHalogen
+x5_NumMultBonds <- PMA_PreModelling_Train$NumMultBonds
+X = data.frame(x1_MolWeight, 
+               x2_NumCarbon, 
+               x3_NumChlorine, 
+               x4_NumHalogen, 
+               x5_NumMultBonds)
+
+##################################
+# Estimating the linear regression coefficients
+# using the normal equations algorithm
+##################################
+LR_NE <- NormalEquations_LREstimation(y = y,
+                                      X = X)
+
+##################################
+# Consolidating all estimated
+# linear regression coefficients
+# using the normal equations algorithm
+##################################
+LR_NE <- as.data.frame(LR_NE)
+rownames(LR_NE) <- NULL
+colnames(LR_NE) <- c("LRCoefficients")
+LR_NE$LRCoefficientNames <- c("Intercept",
+                              "MolWeight",
+                              "NumCarbon",
+                              "NumChlorine",
+                              "NumHalogen",
+                              "NumMultBonds")
+LR_NE$EstimationMethod <- rep("LR_NE",nrow(LR_NE))
+
+##################################
+# Summarizing the estimated
+# linear regression coefficients
+# using the normal equations algorithm
+##################################
+print(LR_NE)
+
+```
+
+###  1.5.2 Linear Regression - Gradient Descent Algorithm with Very High Learning Rate and Low Epoch Count (LR_GDA_VHLR_LEC)
+|
+| **[A]** The gradient descent algorithm was implemented with parameter settings described as follows:
+|      **[A.1]** <span style="color: #FF0000">Learning Rate</span> = 200 (Very High)
+|      **[A.2]** <span style="color: #FF0000">Epochs</span> = 10 (Low)
+|
+| **[B]** The final gradient norm was determined as 0.42670 at the 10th epoch indicating that the minimum threshold of 0.00010 was not achieved up until the last epoch.
+|
+| **[C]** Applying the gradient descent algorithm with a high learning rate and low epoch count, the estimated linear regression coefficients for the given data are as follows:
+|      **[C.1]** <span style="color: #FF0000">Intercept</span> = -2.71856 (Baseline = -2.71856)
+|      **[C.2]** <span style="color: #FF0000">MolWeight</span> = +0.26840 (Baseline = +0.20493)
+|      **[C.3]** <span style="color: #FF0000">NumCarbon</span> = -1.41262 (Baseline = -1.25425)
+|      **[C.4]** <span style="color: #FF0000">NumChlorine</span> = -0.60097 (Baseline = -0.14419)
+|      **[C.5]** <span style="color: #FF0000">NumHalogen</span> = -0.68157 (Baseline = -1.01350)
+|      **[C.6]** <span style="color: #FF0000">NumMultBonds</span> = -0.34150 (Baseline = -0.33048)
+|
+| **[D]** The estimated coefficients using the gradient descent algorithm with a high learning rate and high epoch count, while not fully optimized, were sufficiently comparable with the baseline coefficients using normal equations.
+|
+```{r section_1.5.2, warning=FALSE, message=FALSE}
+##################################
+# Defining a function to implement
+# gradient descent algorithm for estimating
+# linear regression coefficients
+##################################
+GradientDescent_LREstimation <-function(y, X, GradientNormMinimumThreshold, LearningRate, Epochs){
+  GradientNormMinimumThreshold = 0.0001
+  X = as.matrix(data.frame(rep(1,length(y)),X))
+  N= dim(X)[1]
+  print("Initializing Gradient Descent Algorithm Parameters.")
+  set.seed(12345678)
+  Theta.InitialValue = as.matrix(rnorm(n=dim(X)[2], mean=0,sd = 1)) 
+  Theta.InitialValue = t(Theta.InitialValue)
+  e = t(y) - Theta.InitialValue%*%t(X)
+  Gradient.InitialValue = -(2/N)%*%(e)%*%X
+  Theta = Theta.InitialValue - LearningRate *(1/N)*Gradient.InitialValue
+  L2Loss = c()
+  for(i in 1:Epochs){
+    L2Loss = c(L2Loss,sqrt(sum((t(y) - Theta%*%t(X))^2)))
+    e = t(y) - Theta%*%t(X)
+    grad = -(2/N)%*%e%*%X
+    Theta = Theta - LearningRate*(2/N)*grad
+    if(sqrt(sum(grad^2)) <= GradientNormMinimumThreshold){
+      break
+    }
+  }
+  if (i < Epochs) {
+    print("Gradient Descent Algorithm Converged.")
+  }
+  if (i == Epochs) {
+    print("Gradient Descent Algorithm Reached Last Epoch Without Convergence.")
+    print("Minimum Threshold for Gradient Norm = 0.0001 Not Achieved.")
+  }
+  print(paste("Final Gradient Norm Determined as ",sqrt(sum(grad^2)),"at Epoch",i))
+  GradientDescentAlgorithmValues <- list("LRCoefficients" = t(Theta), "L2Loss" = L2Loss)
+  return(GradientDescentAlgorithmValues)
+}
+
+##################################
+# Estimating the linear regression coefficients
+# using the gradient descent algorithm
+# with very high learning rate and low epoch count
+##################################
+LR_GDA_VHLR_LEC = GradientDescent_LREstimation(y = y,
+                                          X = X,
+                                          LearningRate = 200, 
+                                          Epochs = 10)
+
+LR_GDA_VHLR_LEC_Summary <- LR_GDA_VHLR_LEC
+
+##################################
+# Consolidating all estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with very high learning rate and low epoch count
+##################################
+LR_GDA_VHLR_LEC <- as.data.frame(LR_GDA_VHLR_LEC_Summary$LRCoefficients)
+rownames(LR_GDA_VHLR_LEC) <- NULL
+colnames(LR_GDA_VHLR_LEC) <- c("LRCoefficients")
+LR_GDA_VHLR_LEC$LRCoefficientNames <- c("Intercept",
+                                   "MolWeight",
+                                   "NumCarbon",
+                                   "NumChlorine",
+                                   "NumHalogen",
+                                   "NumMultBonds")
+LR_GDA_VHLR_LEC$EstimationMethod <- rep("LR_GDA_VHLR_LEC",nrow(LR_GDA_VHLR_LEC))
+
+##################################
+# Summarizing the estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with very high learning rate and low epoch count
+##################################
+print(LR_GDA_VHLR_LEC)
+
+##################################
+# Gathering the cost function optimization data
+# for the gradient descent algorithm
+# with very high learning rate and low epoch count
+##################################
+LR_GDA_VHLR_LEC_Summary$Epoch <- 1:length(LR_GDA_VHLR_LEC_Summary$L2Loss)
+LR_GDA_VHLR_LEC_Summary$Method <- rep("LR_GDA_VHLR_LEC",length(LR_GDA_VHLR_LEC_Summary$L2Loss))
+
+L2Loss <- LR_GDA_VHLR_LEC_Summary$L2Loss
+Epoch  <- LR_GDA_VHLR_LEC_Summary$Epoch
+Method <- LR_GDA_VHLR_LEC_Summary$Method
+(LR_GDA_VHLR_LEC_ConsolidatedSummary <- cbind(L2Loss, Epoch, Method))
+
+##################################
+# Plotting the cost function optimization data
+# for the gradient descent algorithm
+# with very high learning rate and low epoch count
+##################################
+xyplot(L2Loss ~ Epoch,
+       data = LR_GDA_VHLR_LEC_Summary,
+       main = "Cost Function Optimization Profile : LR_GDA_VHLR_LEC",
+       ylab = "L2 Loss",
+       xlab = "Epoch",
+       type=c("p"),
+       origin = 0,
+       alpha = 0.45,
+       pch = 16,
+       cex = 1,
+       xlim = c(0, 50),
+       ylim = c(30, 150))
+
+```
+
+###  1.5.3 Linear Regression - Gradient Descent Algorithm with Very High Learning Rate and High Epoch Count (LR_GDA_VHLR_HEC)
+|
+| **[A]** The gradient descent algorithm was implemented with parameter settings described as follows:
+|      **[A.1]** <span style="color: #FF0000">Learning Rate</span> = 200 (Very High)
+|      **[A.2]** <span style="color: #FF0000">Epochs</span> = 50 (High)
+|
+| **[B]** The final gradient norm was determined as 11.84773 at the 50th epoch indicating that the minimum threshold of 0.00010 was not achieved prior to the last epoch.
+|
+| **[C]** Applying the gradient descent algorithm with a high learning rate and high epoch count, the estimated linear regression coefficients for the given data are as follows:
+|      **[C.1]** <span style="color: #FF0000">Intercept</span> = -2.71857 (Baseline = -2.71856)
+|      **[C.2]** <span style="color: #FF0000">MolWeight</span> = -1.26942 (Baseline = +0.20493)
+|      **[C.3]** <span style="color: #FF0000">NumCarbon</span> = -2.36919 (Baseline = -1.25425)
+|      **[C.4]** <span style="color: #FF0000">NumChlorine</span> = -1.21815 (Baseline = -0.14419)
+|      **[C.5]** <span style="color: #FF0000">NumHalogen</span> = -2.00242 (Baseline = -1.01350)
+|      **[C.6]** <span style="color: #FF0000">NumMultBonds</span> = -1.42725 (Baseline = -0.33048)
+|
+| **[D]** The estimated coefficients using the gradient descent algorithm with a very high learning rate and high epoch count were not fully optimized and were not comparable with the baseline coefficients using normal equations.
+|
+```{r section_1.5.3, warning=FALSE, message=FALSE}
+##################################
+# Estimating the linear regression coefficients
+# using the gradient descent algorithm
+# with very high learning rate and high epoch count
+##################################
+LR_GDA_VHLR_HEC = GradientDescent_LREstimation(y = y,
+                                          X = X,
+                                          LearningRate = 200, 
+                                          Epochs = 50)
+
+LR_GDA_VHLR_HEC_Summary <- LR_GDA_VHLR_HEC
+
+##################################
+# Consolidating all estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with very high learning rate and high epoch count
+##################################
+LR_GDA_VHLR_HEC <- as.data.frame(LR_GDA_VHLR_HEC_Summary$LRCoefficients)
+rownames(LR_GDA_VHLR_HEC) <- NULL
+colnames(LR_GDA_VHLR_HEC) <- c("LRCoefficients")
+LR_GDA_VHLR_HEC$LRCoefficientNames <- c("Intercept",
+                                   "MolWeight",
+                                   "NumCarbon",
+                                   "NumChlorine",
+                                   "NumHalogen",
+                                   "NumMultBonds")
+LR_GDA_VHLR_HEC$EstimationMethod <- rep("LR_GDA_VHLR_HEC",nrow(LR_GDA_VHLR_HEC))
+
+##################################
+# Summarizing the estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with very high learning rate and high epoch count
+##################################
+print(LR_GDA_VHLR_HEC)
+
+
+##################################
+# Gathering the cost function optimization data
+# for the gradient descent algorithm
+# with very high learning rate and high epoch count
+##################################
+LR_GDA_VHLR_HEC_Summary$Epoch <- 1:length(LR_GDA_VHLR_HEC_Summary$L2Loss)
+LR_GDA_VHLR_HEC_Summary$Method <- rep("LR_GDA_VHLR_HEC",length(LR_GDA_VHLR_HEC_Summary$L2Loss))
+
+L2Loss <- LR_GDA_VHLR_HEC_Summary$L2Loss
+Epoch  <- LR_GDA_VHLR_HEC_Summary$Epoch
+Method <- LR_GDA_VHLR_HEC_Summary$Method
+(LR_GDA_VHLR_HEC_ConsolidatedSummary <- cbind(L2Loss, Epoch, Method))
+
+##################################
+# Plotting the cost function optimization data
+# for the gradient descent algorithm
+# with very high learning rate and high epoch count
+##################################
+xyplot(L2Loss ~ Epoch,
+       data = LR_GDA_VHLR_HEC_Summary,
+       main = "Cost Function Optimization Profile : LR_GDA_VHLR_HEC",
+       ylab = "L2 Loss",
+       xlab = "Epoch",
+       type=c("p"),
+       origin = 0,
+       alpha = 0.45,
+       pch = 16,
+       cex = 1,
+       xlim = c(0, 50),
+       ylim = c(30, 150))
+
+```
+
+###  1.5.4 Linear Regression - Gradient Descent Algorithm with High Learning Rate and Low Epoch Count (LR_GDA_HLR_LEC)
+|
+| **[A]** The gradient descent algorithm was implemented with parameter settings described as follows:
+|      **[A.1]** <span style="color: #FF0000">Learning Rate</span> = 100 (High)
+|      **[A.2]** <span style="color: #FF0000">Epochs</span> = 10 (Low)
+|
+| **[B]** The final gradient norm was determined as 0.32722 at the 10th epoch indicating that the minimum threshold of 0.00010 was not achieved up until the last epoch.
+|
+| **[C]** Applying the gradient descent algorithm with a high learning rate and low epoch count, the estimated linear regression coefficients for the given data are as follows:
+|      **[C.1]** <span style="color: #FF0000">Intercept</span> = -2.70555 (Baseline = -2.71856)
+|      **[C.2]** <span style="color: #FF0000">MolWeight</span> = +0.60475 (Baseline = +0.20493)
+|      **[C.3]** <span style="color: #FF0000">NumCarbon</span> = -1.63634 (Baseline = -1.25425)
+|      **[C.4]** <span style="color: #FF0000">NumChlorine</span> = -0.84899 (Baseline = -0.14419)
+|      **[C.5]** <span style="color: #FF0000">NumHalogen</span> = -0.49265 (Baseline = -1.01350)
+|      **[C.6]** <span style="color: #FF0000">NumMultBonds</span> = -0.29582 (Baseline = -0.33048)
+|
+| **[D]** The estimated coefficients using the gradient descent algorithm with a high learning rate and low epoch count were not fully optimized and were not comparable with the baseline coefficients using normal equations.
+|
+```{r section_1.5.4, warning=FALSE, message=FALSE}
+##################################
+# Estimating the linear regression coefficients
+# using the gradient descent algorithm
+# with high learning rate and low epoch count
+##################################
+LR_GDA_HLR_LEC = GradientDescent_LREstimation(y = y,
+                                          X = X,
+                                          LearningRate = 100, 
+                                          Epochs = 10)
+
+LR_GDA_HLR_LEC_Summary <- LR_GDA_HLR_LEC
+
+##################################
+# Consolidating all estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with high learning rate and low epoch count
+##################################
+LR_GDA_HLR_LEC <- as.data.frame(LR_GDA_HLR_LEC_Summary$LRCoefficients)
+rownames(LR_GDA_HLR_LEC) <- NULL
+colnames(LR_GDA_HLR_LEC) <- c("LRCoefficients")
+LR_GDA_HLR_LEC$LRCoefficientNames <- c("Intercept",
+                                   "MolWeight",
+                                   "NumCarbon",
+                                   "NumChlorine",
+                                   "NumHalogen",
+                                   "NumMultBonds")
+LR_GDA_HLR_LEC$EstimationMethod <- rep("LR_GDA_HLR_LEC",nrow(LR_GDA_HLR_LEC))
+
+##################################
+# Summarizing the estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with high learning rate and low epoch count
+##################################
+print(LR_GDA_HLR_LEC)
+
+##################################
+# Gathering the cost function optimization data
+# for the gradient descent algorithm
+# with high learning rate and low epoch count
+##################################
+LR_GDA_HLR_LEC_Summary$Epoch <- 1:length(LR_GDA_HLR_LEC_Summary$L2Loss)
+LR_GDA_HLR_LEC_Summary$Method <- rep("LR_GDA_HLR_LEC",length(LR_GDA_HLR_LEC_Summary$L2Loss))
+
+L2Loss <- LR_GDA_HLR_LEC_Summary$L2Loss
+Epoch  <- LR_GDA_HLR_LEC_Summary$Epoch
+Method <- LR_GDA_HLR_LEC_Summary$Method
+(LR_GDA_HLR_LEC_ConsolidatedSummary <- cbind(L2Loss, Epoch, Method))
+
+##################################
+# Plotting the cost function optimization data
+# for the gradient descent algorithm
+# with high learning rate and low epoch count
+##################################
+xyplot(L2Loss ~ Epoch,
+       data = LR_GDA_HLR_LEC_Summary,
+       main = "Cost Function Optimization Profile : LR_GDA_HLR_LEC",
+       ylab = "L2 Loss",
+       xlab = "Epoch",
+       type=c("p"),
+       origin = 0,
+       alpha = 0.45,
+       pch = 16,
+       cex = 1,
+       xlim = c(0, 50),
+       ylim = c(30, 150))
+
+```
+
+###  1.5.5 Linear Regression - Gradient Descent Algorithm with High Learning Rate and High Epoch Count (LR_GDA_HLR_HEC)
+|
+| **[A]** The gradient descent algorithm was implemented with parameter settings described as follows:
+|      **[A.1]** <span style="color: #FF0000">Learning Rate</span> = 100 (High)
+|      **[A.2]** <span style="color: #FF0000">Epochs</span> = 50 (High)
+|
+| **[B]** The final gradient norm was determined as 0.03004 at the 50th epoch indicating that the minimum threshold of 0.00010 was not achieved prior to the last epoch.
+|
+| **[C]** Applying the gradient descent algorithm with a high learning rate and high epoch count, the estimated linear regression coefficients for the given data are as follows:
+|      **[C.1]** <span style="color: #FF0000">Intercept</span> = -2.71856 (Baseline = -2.71856)
+|      **[C.2]** <span style="color: #FF0000">MolWeight</span> = +0.16985 (Baseline = +0.20493)
+|      **[C.3]** <span style="color: #FF0000">NumCarbon</span> = -1.22196 (Baseline = -1.25425)
+|      **[C.4]** <span style="color: #FF0000">NumChlorine</span> = -0.29779 (Baseline = -0.14419)
+|      **[C.5]** <span style="color: #FF0000">NumHalogen</span> = -0.84627 (Baseline = -1.01350)
+|      **[C.6]** <span style="color: #FF0000">NumMultBonds</span> = -0.33109 (Baseline = -0.33048)
+|
+| **[D]** The estimated coefficients using the gradient descent algorithm with a high learning rate and high epoch count, while not fully optimized, were sufficiently comparable with the baseline coefficients using normal equations.
+|
+```{r section_1.5.5, warning=FALSE, message=FALSE}
+##################################
+# Estimating the linear regression coefficients
+# using the gradient descent algorithm
+# with high learning rate and high epoch count
+##################################
+LR_GDA_HLR_HEC = GradientDescent_LREstimation(y = y,
+                                          X = X,
+                                          LearningRate = 100, 
+                                          Epochs = 50)
+
+LR_GDA_HLR_HEC_Summary <- LR_GDA_HLR_HEC
+
+##################################
+# Consolidating all estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with high learning rate and high epoch count
+##################################
+LR_GDA_HLR_HEC <- as.data.frame(LR_GDA_HLR_HEC_Summary$LRCoefficients)
+rownames(LR_GDA_HLR_HEC) <- NULL
+colnames(LR_GDA_HLR_HEC) <- c("LRCoefficients")
+LR_GDA_HLR_HEC$LRCoefficientNames <- c("Intercept",
+                                   "MolWeight",
+                                   "NumCarbon",
+                                   "NumChlorine",
+                                   "NumHalogen",
+                                   "NumMultBonds")
+LR_GDA_HLR_HEC$EstimationMethod <- rep("LR_GDA_HLR_HEC",nrow(LR_GDA_HLR_HEC))
+
+##################################
+# Summarizing the estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with high learning rate and high epoch count
+##################################
+print(LR_GDA_HLR_HEC)
+
+
+##################################
+# Gathering the cost function optimization data
+# for the gradient descent algorithm
+# with high learning rate and high epoch count
+##################################
+LR_GDA_HLR_HEC_Summary$Epoch <- 1:length(LR_GDA_HLR_HEC_Summary$L2Loss)
+LR_GDA_HLR_HEC_Summary$Method <- rep("LR_GDA_HLR_HEC",length(LR_GDA_HLR_HEC_Summary$L2Loss))
+
+L2Loss <- LR_GDA_HLR_HEC_Summary$L2Loss
+Epoch  <- LR_GDA_HLR_HEC_Summary$Epoch
+Method <- LR_GDA_HLR_HEC_Summary$Method
+(LR_GDA_HLR_HEC_ConsolidatedSummary <- cbind(L2Loss, Epoch, Method))
+
+##################################
+# Plotting the cost function optimization data
+# for the gradient descent algorithm
+# with high learning rate and high epoch count
+##################################
+xyplot(L2Loss ~ Epoch,
+       data = LR_GDA_HLR_HEC_Summary,
+       main = "Cost Function Optimization Profile : LR_GDA_HLR_HEC",
+       ylab = "L2 Loss",
+       xlab = "Epoch",
+       type=c("p"),
+       origin = 0,
+       alpha = 0.45,
+       pch = 16,
+       cex = 1,
+       xlim = c(0, 50),
+       ylim = c(30, 150))
+
+```
+
+###  1.5.6 Linear Regression - Gradient Descent Algorithm with Low Learning Rate and Low Epoch Count (LR_GDA_LLR_LEC)
+|
+| **[A]** The gradient descent algorithm was implemented with parameter settings described as follows:
+|      **[A.1]** <span style="color: #FF0000">Learning Rate</span> = 50 (Low)
+|      **[A.2]** <span style="color: #FF0000">Epochs</span> = 10 (Low)
+|
+| **[B]** The final gradient norm was determined as 0.96221 at the 10th epoch indicating that the minimum threshold of 0.00010 was not achieved prior to the last epoch.
+|
+| **[C]** Applying the gradient descent algorithm with a low learning rate and low epoch count, the estimated linear regression coefficients for the given data are as follows:
+|      **[C.1]** <span style="color: #FF0000">Intercept</span> = -2.39224 (Baseline = -2.71856)
+|      **[C.2]** <span style="color: #FF0000">MolWeight</span> = +0.89396 (Baseline = +0.20493)
+|      **[C.3]** <span style="color: #FF0000">NumCarbon</span> = -1.84352 (Baseline = -1.25425)
+|      **[C.4]** <span style="color: #FF0000">NumChlorine</span> = -1.06912 (Baseline = -0.14419)
+|      **[C.5]** <span style="color: #FF0000">NumHalogen</span> = -0.38068 (Baseline = -1.01350)
+|      **[C.6]** <span style="color: #FF0000">NumMultBonds</span> = -0.36341 (Baseline = -0.33048)
+|
+| **[D]** The estimated coefficients using the gradient descent algorithm with a low learning rate and low epoch count were not fully optimized and were not comparable with the baseline coefficients using normal equations.
+|
+```{r section_1.5.6, warning=FALSE, message=FALSE}
+##################################
+# Estimating the linear regression coefficients
+# using the gradient descent algorithm
+# with low learning rate and low epoch count
+##################################
+LR_GDA_LLR_LEC = GradientDescent_LREstimation(y = y,
+                                          X = X,
+                                          LearningRate = 50, 
+                                          Epochs = 10)
+
+LR_GDA_LLR_LEC_Summary <- LR_GDA_LLR_LEC
+
+##################################
+# Consolidating all estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with low learning rate and low epoch count
+##################################
+LR_GDA_LLR_LEC <- as.data.frame(LR_GDA_LLR_LEC_Summary$LRCoefficients)
+rownames(LR_GDA_LLR_LEC) <- NULL
+colnames(LR_GDA_LLR_LEC) <- c("LRCoefficients")
+LR_GDA_LLR_LEC$LRCoefficientNames <- c("Intercept",
+                                   "MolWeight",
+                                   "NumCarbon",
+                                   "NumChlorine",
+                                   "NumHalogen",
+                                   "NumMultBonds")
+LR_GDA_LLR_LEC$EstimationMethod <- rep("LR_GDA_LLR_LEC",nrow(LR_GDA_LLR_LEC))
+
+##################################
+# Summarizing the estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with low learning rate and low epoch count
+##################################
+print(LR_GDA_LLR_LEC)
+
+
+##################################
+# Gathering the cost function optimization data
+# for the gradient descent algorithm
+# with low learning rate and low epoch count
+##################################
+LR_GDA_LLR_LEC_Summary$Epoch <- 1:length(LR_GDA_LLR_LEC_Summary$L2Loss)
+LR_GDA_LLR_LEC_Summary$Method <- rep("LR_GDA_LLR_LEC",length(LR_GDA_LLR_LEC_Summary$L2Loss))
+
+L2Loss <- LR_GDA_LLR_LEC_Summary$L2Loss
+Epoch  <- LR_GDA_LLR_LEC_Summary$Epoch
+Method <- LR_GDA_LLR_LEC_Summary$Method
+(LR_GDA_LLR_LEC_ConsolidatedSummary <- cbind(L2Loss, Epoch, Method))
+
+##################################
+# Plotting the cost function optimization data
+# for the gradient descent algorithm
+# with low learning rate and low epoch count
+##################################
+xyplot(L2Loss ~ Epoch,
+       data = LR_GDA_LLR_LEC_Summary,
+       main = "Cost Function Optimization Profile : LR_GDA_LLR_LEC",
+       ylab = "L2 Loss",
+       xlab = "Epoch",
+       type=c("p"),
+       origin = 0,
+       alpha = 0.45,
+       pch = 16,
+       cex = 1,
+       xlim = c(0, 50),
+       ylim = c(30, 150))
+
+```
+
+###  1.5.7 Linear Regression - Gradient Descent Algorithm with Low Learning Rate and High Epoch Count (LR_GDA_LLR_HEC)
+|
+| **[A]** The gradient descent algorithm was implemented with parameter settings described as follows:
+|      **[A.1]** <span style="color: #FF0000">Learning Rate</span> = 50 (Low)
+|      **[A.2]** <span style="color: #FF0000">Epochs</span> = 50 (High)
+|
+| **[B]** The final gradient norm was determined as 0.11481 at the 50th epoch indicating that the minimum threshold of 0.00010 was not achieved prior to the last epoch.
+|
+| **[C]** Applying the gradient descent algorithm with a low learning rate and high epoch count, the estimated linear regression coefficients for the given data are as follows:
+|      **[C.1]** <span style="color: #FF0000">Intercept</span> = -2.71854 (Baseline = -2.71856)
+|      **[C.2]** <span style="color: #FF0000">MolWeight</span> = +0.28134 (Baseline = +0.20493)
+|      **[C.3]** <span style="color: #FF0000">NumCarbon</span> = -1.33710 (Baseline = -1.25425)
+|      **[C.4]** <span style="color: #FF0000">NumChlorine</span> = -0.51277 (Baseline = -0.14419)
+|      **[C.5]** <span style="color: #FF0000">NumHalogen</span> = -0.68397 (Baseline = -1.01350)
+|      **[C.6]** <span style="color: #FF0000">NumMultBonds</span> = -0.31132 (Baseline = -0.33048)
+|
+| **[D]** The estimated coefficients using the gradient descent algorithm with a low learning rate and high epoch count, while not fully optimized, were sufficiently comparable with the baseline coefficients using normal equations.
+|
+```{r section_1.5.7, warning=FALSE, message=FALSE}
+##################################
+# Estimating the linear regression coefficients
+# using the gradient descent algorithm
+# with low learning rate and high epoch count
+##################################
+LR_GDA_LLR_HEC = GradientDescent_LREstimation(y = y,
+                                          X = X,
+                                          LearningRate = 50, 
+                                          Epochs = 50)
+
+LR_GDA_LLR_HEC_Summary <- LR_GDA_LLR_HEC
+
+##################################
+# Consolidating all estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with low learning rate and high epoch count
+##################################
+LR_GDA_LLR_HEC <- as.data.frame(LR_GDA_LLR_HEC_Summary$LRCoefficients)
+rownames(LR_GDA_LLR_HEC) <- NULL
+colnames(LR_GDA_LLR_HEC) <- c("LRCoefficients")
+LR_GDA_LLR_HEC$LRCoefficientNames <- c("Intercept",
+                                   "MolWeight",
+                                   "NumCarbon",
+                                   "NumChlorine",
+                                   "NumHalogen",
+                                   "NumMultBonds")
+LR_GDA_LLR_HEC$EstimationMethod <- rep("LR_GDA_LLR_HEC",nrow(LR_GDA_LLR_HEC))
+
+##################################
+# Summarizing the estimated
+# linear regression coefficients
+# using the gradient descent algorithm
+# with low learning rate and high epoch count
+##################################
+print(LR_GDA_LLR_HEC)
+
+
+##################################
+# Gathering the cost function optimization data
+# for the gradient descent algorithm
+# with low learning rate and high epoch count
+##################################
+LR_GDA_LLR_HEC_Summary$Epoch <- 1:length(LR_GDA_LLR_HEC_Summary$L2Loss)
+LR_GDA_LLR_HEC_Summary$Method <- rep("LR_GDA_LLR_HEC",length(LR_GDA_LLR_HEC_Summary$L2Loss))
+
+L2Loss <- LR_GDA_LLR_HEC_Summary$L2Loss
+Epoch  <- LR_GDA_LLR_HEC_Summary$Epoch
+Method <- LR_GDA_LLR_HEC_Summary$Method
+(LR_GDA_LLR_HEC_ConsolidatedSummary <- cbind(L2Loss, Epoch, Method))
+
+##################################
+# Plotting the cost function optimization data
+# for the gradient descent algorithm
+# with low learning rate and high epoch count
+##################################
+xyplot(L2Loss ~ Epoch,
+       data = LR_GDA_LLR_HEC_Summary,
+       main = "Cost Function Optimization Profile : LR_GDA_LLR_HEC",
+       ylab = "L2 Loss",
+       xlab = "Epoch",
+       type=c("p"),
+       origin = 0,
+       alpha = 0.45,
+       pch = 16,
+       cex = 1,
+       xlim = c(0, 50),
+       ylim = c(30, 150))
+
+```
+
+##  1.6 Linear Regression Model Coefficient Estimation Evaluation Summary
+|
+| **[A]** The gradient descent algorithms with sufficiently comparable coefficients with the baseline despite not achieving fully optimized coefficients  is as follows:
+|      **[A.1]** LR_GDA_HLR_HEC : Linear Regression - Gradient Descent Algorithm with High Learning Rate and High Epoch Count
+|      **[A.2]** LR_GDA_LLR_HEC : Linear Regression - Gradient Descent Algorithm with Low Learning Rate and High Epoch Count
+|      **[A.3]** LR_GDA_VHLR_HLEC : Linear Regression - Gradient Descent Algorithm with Very High Learning Rate and Low Epoch Count
+|
+| **[A]** The choice of gradient norm minimum threshold for convergence, learning rate and the epoch count in the implementation of the gradient descent algorithm are critical to achieving fully optimized coefficients while maintaining a sensibly minimal cost function.
+|
+```{r section_1.6, warning=FALSE, message=FALSE}
+##################################
+# Consolidating the cost function optimization data
+# for all gradient descent algorithms
+# with different learning rates and epoch counts
+##################################
+LR_GDA_ConsolidatedSummary <- rbind(LR_GDA_VHLR_LEC_ConsolidatedSummary,
+                                    LR_GDA_VHLR_HEC_ConsolidatedSummary,
+                                    LR_GDA_HLR_LEC_ConsolidatedSummary,
+                                    LR_GDA_HLR_HEC_ConsolidatedSummary,
+                                    LR_GDA_LLR_LEC_ConsolidatedSummary,
+                                    LR_GDA_LLR_HEC_ConsolidatedSummary)
+
+LR_GDA_ConsolidatedSummary <- as.data.frame(LR_GDA_ConsolidatedSummary)
+
+LR_GDA_ConsolidatedSummary$L2Loss <- as.numeric(as.character(LR_GDA_ConsolidatedSummary$L2Loss))
+LR_GDA_ConsolidatedSummary$Epoch  <- as.numeric(as.character(LR_GDA_ConsolidatedSummary$Epoch))
+LR_GDA_ConsolidatedSummary$Method <- factor(LR_GDA_ConsolidatedSummary$Method,
+                                            levels = c("LR_GDA_LLR_LEC",
+                                                       "LR_GDA_HLR_LEC",
+                                                       "LR_GDA_VHLR_LEC",
+                                                       "LR_GDA_LLR_HEC",
+                                                       "LR_GDA_HLR_HEC",
+                                                       "LR_GDA_VHLR_HEC"))
+
+##################################
+# Plotting the cost function optimization data
+# for all gradient descent algorithms
+# with different learning rates and epoch counts
+##################################
+xyplot(L2Loss ~ Epoch | Method,
+       data = LR_GDA_ConsolidatedSummary,
+       main = "Cost Function Optimization Profile for Gradient Descent Algorithm with Different Learning Rates and Epoch Counts",
+       ylab = "L2 Loss",
+       xlab = "Epoch",
+       type=c("p"),
+       origin = 0,
+       alpha = 0.45,
+       pch = 16,
+       cex = 1,
+       xlim = c(0, 50),
+       ylim = c(30, 150))
+
+##################################
+# Gathering the estimated coefficients
+# for normal equations and all gradient descent algorithms
+# with different learning rates and epoch counts
+##################################
+LR_NE_VS_LR_GDA_VHLR_LEC <- as.data.frame(LR_NE)
+LR_NE_VS_LR_GDA_VHLR_HEC <- as.data.frame(LR_NE)
+LR_NE_VS_LR_GDA_HLR_LEC <- as.data.frame(LR_NE)
+LR_NE_VS_LR_GDA_HLR_HEC <- as.data.frame(LR_NE)
+LR_NE_VS_LR_GDA_LLR_LEC <- as.data.frame(LR_NE)
+LR_NE_VS_LR_GDA_LLR_HEC <- as.data.frame(LR_NE)
+ 
+LR_NE_VS_LR_GDA_VHLR_LEC$Group <- rep("LR_NE Versus LR_GDA_VHLR_LEC",nrow(LR_NE_VS_LR_GDA_VHLR_LEC))
+LR_NE_VS_LR_GDA_VHLR_HEC$Group <- rep("LR_NE Versus LR_GDA_VHLR_HEC",nrow(LR_NE_VS_LR_GDA_VHLR_LEC))
+LR_NE_VS_LR_GDA_HLR_LEC$Group <- rep("LR_NE Versus LR_GDA_HLR_LEC",nrow(LR_NE_VS_LR_GDA_HLR_LEC))
+LR_NE_VS_LR_GDA_HLR_HEC$Group <- rep("LR_NE Versus LR_GDA_HLR_HEC",nrow(LR_NE_VS_LR_GDA_HLR_LEC))
+LR_NE_VS_LR_GDA_LLR_LEC$Group <- rep("LR_NE Versus LR_GDA_LLR_LEC",nrow(LR_NE_VS_LR_GDA_HLR_LEC))
+LR_NE_VS_LR_GDA_LLR_HEC$Group <- rep("LR_NE Versus LR_GDA_LLR_HEC",nrow(LR_NE_VS_LR_GDA_HLR_LEC))
+LR_GDA_VHLR_LEC$Group <- rep("LR_NE Versus LR_GDA_VHLR_LEC",nrow(LR_GDA_VHLR_LEC))
+LR_GDA_VHLR_HEC$Group <- rep("LR_NE Versus LR_GDA_VHLR_HEC",nrow(LR_GDA_VHLR_HEC))
+LR_GDA_HLR_LEC$Group <- rep("LR_NE Versus LR_GDA_HLR_LEC",nrow(LR_GDA_HLR_LEC))
+LR_GDA_HLR_HEC$Group <- rep("LR_NE Versus LR_GDA_HLR_HEC",nrow(LR_GDA_HLR_HEC))
+LR_GDA_LLR_LEC$Group <- rep("LR_NE Versus LR_GDA_LLR_LEC",nrow(LR_GDA_LLR_LEC))
+LR_GDA_LLR_HEC$Group <- rep("LR_NE Versus LR_GDA_LLR_HEC",nrow(LR_GDA_LLR_HEC))
+
+##################################
+# Consolidating the estimated coefficients
+# for normal equations and all gradient descent algorithms
+# with different learning rates and epoch counts
+##################################
+LR_NE_GDA_ConsolidatedSummary <- rbind(LR_NE_VS_LR_GDA_VHLR_LEC,
+                                       LR_NE_VS_LR_GDA_VHLR_HEC,
+                                       LR_NE_VS_LR_GDA_HLR_LEC,
+                                       LR_NE_VS_LR_GDA_HLR_HEC,
+                                       LR_NE_VS_LR_GDA_LLR_LEC,
+                                       LR_NE_VS_LR_GDA_LLR_HEC,
+                                       LR_GDA_VHLR_LEC,
+                                       LR_GDA_VHLR_HEC,
+                                       LR_GDA_HLR_LEC,
+                                       LR_GDA_HLR_HEC,
+                                       LR_GDA_LLR_LEC,
+                                       LR_GDA_LLR_HEC)
+
+LR_NE_GDA_ConsolidatedSummary <- as.data.frame(LR_NE_GDA_ConsolidatedSummary)
+
+LR_NE_GDA_ConsolidatedSummary$LRCoefficients <- as.numeric(as.character(LR_NE_GDA_ConsolidatedSummary$LRCoefficients))
+LR_NE_GDA_ConsolidatedSummary$Group <- factor(LR_NE_GDA_ConsolidatedSummary$Group,
+                                              levels = c("LR_NE Versus LR_GDA_LLR_LEC",
+                                                         "LR_NE Versus LR_GDA_HLR_LEC",
+                                                         "LR_NE Versus LR_GDA_VHLR_LEC",
+                                                         "LR_NE Versus LR_GDA_LLR_HEC",
+                                                         "LR_NE Versus LR_GDA_HLR_HEC",
+                                                         "LR_NE Versus LR_GDA_VHLR_HEC"))
+
+LR_NE_GDA_ConsolidatedSummary$LRCoefficientNames <- factor(LR_NE_GDA_ConsolidatedSummary$LRCoefficientNames,
+                                                           levels = c("NumMultBonds",
+                                                                      "NumHalogen",
+                                                                      "NumChlorine",
+                                                                      "NumCarbon",
+                                                                      "MolWeight",
+                                                                      "Intercept"))
+
+LR_NE_GDA_ConsolidatedSummary$EstimationMethod <- factor(LR_NE_GDA_ConsolidatedSummary$EstimationMethod,
+                                                         levels = c("LR_NE",
+                                                                    "LR_GDA_LLR_LEC",
+                                                                    "LR_GDA_LLR_HEC",
+                                                                    "LR_GDA_HLR_LEC",
+                                                                    "LR_GDA_HLR_HEC",
+                                                                    "LR_GDA_VHLR_LEC",
+                                                                    "LR_GDA_VHLR_HEC"))
+
+print(LR_NE_GDA_ConsolidatedSummary)
+
+
+dotplot(LRCoefficientNames ~ LRCoefficients | Group,
+        data = LR_NE_GDA_ConsolidatedSummary,
+        groups = EstimationMethod,
+        main = "Estimated Linear Regression Coefficient Value Comparison",
+        ylab = "Linear Regression Coefficients",
+        xlab = "Estimated Linear Regression Coefficient Values",
+        auto.key = list(adj = 1),
+        type = c("p", "h"), 
+        # origin = 0,
+        alpha = 0.45,
+        pch = 16,
+        cex = 2)
+
+```
+
+##  1.7 References
+|
+| **[Book]** [Applied Predictive Modeling](http://appliedpredictivemodeling.com/) by Max Kuhn and Kjell Johnson
+| **[Book]** [An Introduction to Statistical Learning](https://www.statlearning.com/) by Gareth James, Daniela Witten, Trevor Hastie and Rob Tibshirani
+| **[Book]** [Multivariate Data Visualization with R](http://lmdvr.r-forge.r-project.org/figures/figures.html) by Deepayan Sarkar
+| **[Book]** [Machine Learning](https://bookdown.org/ssjackson300/Machine-Learning-Lecture-Notes/) by Samuel Jackson
+| **[Book]** [Data Modeling Methods](https://bookdown.org/larget_jacob/data-modeling-methods/) by Jacob Larget
+| **[Book]** [Introduction to R](https://biocorecrg.github.io/CRG_RIntroduction/) by Sara Bonnin
+| **[R Package]** [AppliedPredictiveModeling](https://cran.r-project.org/web//packages/AppliedPredictiveModeling/AppliedPredictiveModeling.pdf) by Max Kuhn
+| **[R Package]** [caret](https://topepo.github.io/caret/index.html) by Max Kuhn
+| **[R Package]** [rpart](https://mran.microsoft.com/web/packages/rpart/rpart.pdf) by Terry Therneau and Beth Atkinson
+| **[R Package]** [lattice](https://cran.r-project.org/web/packages/lattice/lattice.pdf) by  Deepayan Sarkar
+| **[R Package]** [dplyr](https://cran.r-project.org/web/packages/dplyr/index.html/) by Hadley Wickham
+| **[R Package]** [moments](https://cran.r-project.org/web/packages/moments/index.html) by Lukasz Komsta and Frederick
+| **[R Package]** [skimr](https://cran.r-project.org/web/packages/skimr/skimr.pdf) by  Elin Waring
+| **[R Package]** [RANN](https://cran.r-project.org/web/packages/RANN/RANN.pdf) by  Sunil Arya, David Mount, Samuel Kemp and Gregory Jefferis
+| **[R Package]** [corrplot](https://cran.r-project.org/web/packages/corrplot/corrplot.pdf) by Taiyun Wei
+| **[R Package]** [tidyverse](https://cran.r-project.org/web/packages/tidyverse/tidyverse.pdf) by Hadley Wickham
+| **[R Package]** [lares](https://cran.rstudio.com/web/packages/lares/lares.pdf) by Bernardo Lares
+| **[R Package]** [DMwR](https://mran.microsoft.com/snapshot/2016-05-02/web/packages/DMwR/DMwR.pdf) by Luis Torgo
+| **[R Package]** [gridExtra](https://cran.r-project.org/web/packages/gridExtra/gridExtra.pdf) by Baptiste Auguie and Anton Antonov
+| **[R Package]** [rattle](https://cran.r-project.org/web/packages/rattle/rattle.pdf) by Graham Williams
+| **[R Package]** [rpart.plot](https://cran.r-project.org/web/packages/rpart.plot/rpart.plot.pdf) by Stephen Milborrow
+| **[R Package]** [RColorBrewer](https://cran.r-project.org/web//packages/RColorBrewer/RColorBrewer.pdf) by Erich Neuwirth
+| **[R Package]** [stats](https://search.r-project.org/R/refmans/stats/html/00Index.html) by R Core Team
+| **[Article]** [The caret Package](https://topepo.github.io/caret/index.html) by Max Kuhn
+| **[Article]** [A Short Introduction to the caret Package](https://cran.r-project.org/web/packages/caret/vignettes/caret.html) by Max Kuhn
+| **[Article]** [Caret Package – A Practical Guide to Machine Learning in R](https://www.machinelearningplus.com/machine-learning/caret-package/#:~:text=Caret%20is%20short%20for%20Classification%20And%20REgression%20Training.,track%20of%20which%20algorithm%20resides%20in%20which%20package.) by Selva Prabhakaran
+| **[Article]** [Tuning Machine Learning Models Using the Caret R Package](https://machinelearningmastery.com/tuning-machine-learning-models-using-the-caret-r-package/) by Jason Brownlee
+| **[Article]** [Lattice Graphs](http://www.sthda.com/english/wiki/lattice-graphs) by STHDA Team
+| **[Article]** [A Tour of Machine Learning Algorithms](https://machinelearningmastery.com/a-tour-of-machine-learning-algorithms/) by Jason Brownlee
+| **[Article]** [Gradient Descent and Stochastic Gradient Descent in R](https://www.ocf.berkeley.edu/~janastas/stochastic-gradient-descent-in-r.html) by Jason Anastasopoulos
+| **[Article]** [Linear Regression Tutorial Using Gradient Descent for Machine Learning](https://machinelearningmastery.com/linear-regression-tutorial-using-gradient-descent-for-machine-learning/) by Jason Brownlee
+| **[Article]** [An Overview of Gradient Descent Optimization Algorithms](https://ruder.io/optimizing-gradient-descent/) by Sebastian Ruder
+| **[Article]** [What is Gradient Descent?](https://www.ibm.com/topics/gradient-descent) by IBM Team
+| **[Article]** [Gradient Descent in Machine Learning: A Basic Introduction](https://builtin.com/data-science/gradient-descent) by Niklas Donges
+| **[Article]** [Gradient Descent for Linear Regression Explained, Step by Step](https://machinelearningcompass.com/machine_learning_math/gradient_descent_for_linear_regression/) by Boris Giba
+| **[Article]** [Gradient Descent Explained Simply with Examples](https://vitalflux.com/gradient-descent-explained-simply-with-examples/) by Ajitesh Kumar
+| **[Article]** [Implementing the Gradient Descent Algorithm in R](https://www.r-bloggers.com/2017/02/implementing-the-gradient-descent-algorithm-in-r/) by Richter Walsh
+| **[Article]** [Regression via Gradient Descent in R](https://www.r-bloggers.com/2011/11/regression-via-gradient-descent-in-r/) by Matt Bogard
+| **[Article]** [Difference Between Batch Gradient Descent and Stochastic Gradient Descent](https://www.geeksforgeeks.org/difference-between-batch-gradient-descent-and-stochastic-gradient-descent/) by Geeks For Geeks Team
+| **[Article]** [Stochastic Gradient Descent Vs Gradient Descent: A Head-To-Head Comparison](https://sdsclub.com/stochastic-gradient-descent-vs-gradient-descent-a-head-to-head-comparison/) by SDS Club Team
+| **[Article]** [Differences Between Gradient, Stochastic and Mini Batch Gradient Descent](https://www.baeldung.com/cs/gradient-stochastic-and-mini-batch) by Baeldung
+| **[Article]** [Difference Between Backpropagation and Stochastic Gradient Descent](https://machinelearningmastery.com/difference-between-backpropagation-and-stochastic-gradient-descent/) by Jason Brownlee
+| **[Article]** [ML | Normal Equation in Linear Regression](https://www.geeksforgeeks.org/ml-normal-equation-in-linear-regression/) by Geeks For Geeks Team
+| **[Article]** [Derivation of the Normal Equation for Linear Regression](https://eli.thegreenplace.net/2014/derivation-of-the-normal-equation-for-linear-regression/) by Eli Bendersky
+| **[Article]** [Normal Equation](http://mlwiki.org/index.php/Normal_Equation) by ML Wiki Team
+| **[Course]** [Applied Data Mining and Statistical Learning](https://online.stat.psu.edu/stat508/) by Penn State Eberly College of Science
+| **[Course]** [Regression Methods](https://online.stat.psu.edu/stat501/) by Penn State Eberly College of Science
+| **[Course]** [Applied Regression Analysis](https://online.stat.psu.edu/stat462/) by Penn State Eberly College of Science
+| **[Course]** [Applied Data Mining and Statistical Learning](https://online.stat.psu.edu/stat508/) by Penn State Eberly College of Science
+|
+|
+|
+|
