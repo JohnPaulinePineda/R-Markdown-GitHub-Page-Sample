@@ -1460,7 +1460,7 @@ xyplot(L2Loss ~ Epoch,
 
 ##  1.6 Linear Regression Model Coefficient Estimation Evaluation Summary
 |
-| **[A]** The gradient descent algorithms with sufficiently comparable coefficients with the baseline despite not achieving fully optimized coefficients  is as follows:
+| **[A]** The gradient descent algorithms with sufficiently comparable coefficients with the baseline despite not achieving fully optimized coefficients  are as follows:
 |      **[A.1]** LR_GDA_HLR_HEC : Linear Regression - Gradient Descent Algorithm with High Learning Rate and High Epoch Count
 |      **[A.2]** LR_GDA_LLR_HEC : Linear Regression - Gradient Descent Algorithm with Low Learning Rate and High Epoch Count
 |      **[A.3]** LR_GDA_VHLR_HLEC : Linear Regression - Gradient Descent Algorithm with Very High Learning Rate and Low Epoch Count
